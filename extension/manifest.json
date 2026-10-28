@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "Official Check (UAE)",
+  "version": "1.0.0",
+  "description": "Shows official CMA facts about the website or social account you are on: warnings, licences, authorised finfluencers. Silent when there is nothing to say.",
+  "permissions": ["storage"],
+  "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [{ "matches": ["https://*/*"], "js": ["content.js"], "run_at": "document_idle" }],
+  "options_page": "options.html",
+  "icons": { "128": "icon.png" }
+}

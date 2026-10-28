@@ -1,0 +1,6 @@
+{"code":200,"data":{"total":1,"records":4,"page":1,"items":[
+{"code":"CP-0001315","name":"4T GLOBAL MARKETS FINANCIAL SERVICES L.L.C","status":"Active","website":"https://4tglobal.ae/","year":"2025"},
+{"code":"CP-0001657","name":"9XMARKETS INTRODUCTION TO FINANCIAL SERVICES L.L.C","status":"Active","website":"www.9xmarkets.ae","year":"2026"},
+{"code":"CP-0001161","name":"A P C FINANCE CONSULTANTS LLC","status":"Active","website":"www.apc-dubai.com","year":"2024"},
+{"code":"CP-0000152","name":"ABSOLUTE RETURN INVESTMENT ADVISERS (ARIA) LIMITED (DUBAI BRANCH)","status":"Active","website":"www.ariaprivateclients.com","year":"2016"}
+]},"headers":{"Content-Type":"application/json; charset=utf-8","Server":"Microsoft-IIS/10.0"},"dateModified":"2026-10-28T02:07:44.7944094Z"}

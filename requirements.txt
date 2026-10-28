@@ -1,0 +1,19 @@
+# requirements.txt - Python packages for the trust layer (BucketTreasure)
+# needed to run the app and the data pipeline
+fastapi>=0.115
+uvicorn>=0.30
+httpx>=0.27          # browserless HTTP client for the CMA site (and FastAPI's test client)
+pyyaml>=6.0
+openpyxl>=3.1         # Excel files found by the onboarding agent (e.g. CKAN resources on Bayanat)
+
+# needed only to run the tests
+pytest>=8.0
+
+# optional: the AI helper (pick ONE; the app works fully without either)
+# google-genai       # Gemini, set GEMINI_API_KEY (also enables much better voice transcription)
+# anthropic>=0.40    # Claude, set ANTHROPIC_API_KEY
+
+# optional: headless browser, used by (1) the onboarding agent's rung 3 (record the JSON a page loads) and
+# (2) the CMA token fallback (SG_ALLOW_BROWSER=1). Without it those steps are skipped and say so.
+# playwright         # then: playwright install chromium
+# The MCP server (mcp_server.py) needs NO package: the protocol is implemented in the file.

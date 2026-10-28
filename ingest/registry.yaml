@@ -1,0 +1,435 @@
+# =====================================================================================================
+# ingest/registry.yaml - THE list of datasets the assistant may use, and exactly how to fetch each one
+# =====================================================================================================
+# This file is the single source of truth for data retrieval. The AI never invents an endpoint or a
+# parameter: if it is not written here, it is not fetched. Every value below was VERIFIED against the
+# live CMA website on 2026-10-28 (see docs/CMA_API_NOTES.md for the evidence and the quirks found).
+#
+# kinds (each has an adapter in ingest/adapters/):
+#   cma_content_list   POST /api/PublicApi/GetContentList     body: typeId + template + paging
+#   cma_integration    POST /api/PublicApi/GeIntegrationResult body: integrationId + urlParameters
+#                      ("Ge" is the CMA's own spelling of the endpoint; "Get..." does not exist)
+#   cma_activity_map   one GeIntegrationResult call per licensed activity -> which company may do what
+#   html_table         GET a page and read its <table>
+#   local_csv          a file shipped in data/reference/ (pipeline treats it like any other source)
+#
+# Field meanings:
+#   pillar           which of the 3 protection pillars mainly uses it: knowledge | decisions | scams
+#   min_rows         sanity floor: fewer valid rows than this => not published (old copy kept)
+#   max_drop_pct     refuse to publish if the row count falls by more than this vs the current copy
+#   refresh_hours    how old a copy may get before the server refreshes it in the background
+#   supports         the questions this dataset CAN answer (shown to the agents)
+#   limitations      what it can NOT establish (always returned with every search result)
+# =====================================================================================================
+
+site:
+  base_url: https://www.uaecma.gov.ae
+  # Opening this page gives us the session cookie + the anti-forgery token the API demands.
+  session_page: https://www.uaecma.gov.ae/en/open-data/warnings
+  content_list_endpoint: /api/PublicApi/GetContentList
+  integration_endpoint: /api/PublicApi/GeIntegrationResult
+  # GetContentList ignores records that are not live unless asked; this is the filter the site sends.
+  active_filter:
+    - OR_AND_Operator: AND
+      Filters:
+        - {Key: Status, Value: Published, Operator: Contains, OR_AND_Operator: AND}
+        - {Key: Status, Value: Active, Operator: Contains, OR_AND_Operator: AND}
+        - {Key: Status, Value: NotArchived, Operator: Contains, OR_AND_Operator: AND}
+
+datasets:
+
+  # ---------------------------------------------------------------- PILLAR 3: avoid scams
+  - id: cma_warnings
+    official_name: Warnings (unlicensed entities)
+    publisher: UAE Capital Market Authority (CMA)
+    source_page: https://www.uaecma.gov.ae/en/open-data/warnings
+    kind: cma_content_list
+    schema: warnings
+    pillar: scams
+    request: {type_id: 1071, template: warnings.html, sort: [{Key: ItemDate1, Operator: DESC}], page_size: 100}
+    # The API returns the English AND Arabic version of each warning as separate items that share a
+    # groupId. One warning = one groupId. The English title often lists several entities ("1. X 2. Y").
+    record_key: groupId
+    required_fields: [id, groupId, title, languageId]
+    min_rows: 100
+    max_drop_pct: 30
+    refresh_hours: 12
+    supports:
+      - Is this company, person or website named in a CMA warning?
+      - When was the warning published and what did it say?
+    limitations:
+      - Only covers warnings published by the CMA (onshore UAE capital markets). DFSA (DIFC), FSRA (ADGM), the Central Bank and VARA publish their own lists.
+      - NOT appearing in this list does NOT mean a company is safe or licensed.
+      - A similar name is not proof it is the same entity; scammers also copy real firms' names.
+
+  - id: cma_finfluencers
+    official_name: List of Authorized Finfluencers
+    publisher: UAE Capital Market Authority (CMA)
+    source_page: https://www.uaecma.gov.ae/en/open-data/list-of-authorized-finfluencers
+    kind: cma_integration
+    schema: finfluencers
+    pillar: scams
+    request: {integration_id: 2056, page_size: 2147483647, paged: false}   # the site itself asks for "everything"
+    record_key: regNo
+    required_fields: [name, regNo]
+    min_rows: 20
+    max_drop_pct: 40
+    refresh_hours: 24
+    supports:
+      - Is this social-media promoter authorised by the CMA to promote financial products?
+      - Until when is their authorisation valid?
+    limitations:
+      - Authorisation to promote is not a recommendation of any product they promote.
+      - Check the account is really theirs (same handle / email as in the list); impostors copy real influencers.
+
+  - id: cma_violations
+    official_name: Violations and Violators
+    publisher: UAE Capital Market Authority (CMA)
+    source_page: https://www.uaecma.gov.ae/en/open-data/violations-and-violators
+    kind: cma_content_list
+    schema: violations
+    pillar: scams
+    request: {type_id: 1039, template: violations.html, sort: [{Key: attr_order, Operator: ASC}], page_size: 100}
+    record_key: groupId
+    required_fields: [id, groupId, title]
+    min_rows: 1
+    max_drop_pct: 60
+    refresh_hours: 24
+    supports:
+      - Has the CMA published a penalty against this company?
+    limitations:
+      - Only the violations the CMA chose to publish; many penalised individuals appear only as "Investor".
+
+  # ---------------------------------------------------------------- PILLAR 2: decide with care
+  - id: cma_licensed_companies
+    official_name: Licensed Companies
+    publisher: UAE Capital Market Authority (CMA)
+    source_page: https://www.uaecma.gov.ae/en/open-data/licensed-companies
+    kind: cma_integration
+    schema: licensed_companies
+    pillar: decisions
+    request: {integration_id: 2045, page_size: 100, paged: true, also_arabic: true, params: {type: "", keyword: ""}}
+    # Quirk: only PAGE 1 reports the true totals (total = pages, records = rows). Later pages say total=1.
+    record_key: code
+    required_fields: [code, name, status]
+    min_rows: 100
+    max_drop_pct: 30
+    refresh_hours: 24
+    supports:
+      - Is this company licensed by the CMA? What is its licence code, status and website?
+    limitations:
+      - A licence covers SPECIFIC activities only; see cma_licensed_activities for what each firm may do.
+      - Being licensed does not guarantee your money or any return, and does not prove the person contacting you works there.
+      - Banks and insurers are licensed by the Central Bank, DIFC firms by the DFSA, ADGM firms by the FSRA: not in this list.
+
+  - id: cma_licensed_activities
+    official_name: Licensed Companies by permitted activity
+    publisher: UAE Capital Market Authority (CMA)
+    source_page: https://www.uaecma.gov.ae/en/open-data/licensed-companies
+    kind: cma_activity_map
+    schema: activity_map
+    pillar: decisions
+    # 1) integration 2047 lists the activities; 2) integration 2045 with type=<activity id> lists the firms.
+    request: {activity_list_integration_id: 2047, company_integration_id: 2045, page_size: 100}
+    record_key: activity_id
+    required_fields: [activity_id, activity]
+    min_rows: 20
+    max_drop_pct: 40
+    refresh_hours: 72
+    supports:
+      - Which activities is a licensed company allowed to carry out?
+    limitations:
+      - The CMA groups some activities under one id (for example the same approval on two exchanges).
+
+  - id: cma_local_funds
+    official_name: Local Investment Funds
+    publisher: UAE Capital Market Authority (CMA)
+    source_page: https://www.uaecma.gov.ae/en/open-data/mutual-funds/local-funds
+    kind: cma_content_list
+    schema: funds
+    pillar: decisions
+    request: {type_id: 1036, template: localfund.html, sort: [{Key: attr_order, Operator: ASC}], page_size: 100}
+    record_key: groupId
+    required_fields: [id, groupId, title]
+    min_rows: 20
+    max_drop_pct: 40
+    refresh_hours: 72
+    supports: ["Is this investment fund registered with the CMA?"]
+    limitations: ["Registration is not an endorsement of the fund's performance, fees or suitability."]
+
+  - id: cma_passported_funds
+    official_name: Passported Funds
+    publisher: UAE Capital Market Authority (CMA)
+    source_page: https://www.uaecma.gov.ae/en/open-data/mutual-funds/passporting
+    kind: cma_content_list
+    schema: funds
+    pillar: decisions
+    request: {type_id: 1037, template: passportingfund.html, sort: [{Key: ItemDate1, Operator: DESC}], page_size: 100}
+    record_key: groupId
+    required_fields: [id, groupId, title]
+    min_rows: 20
+    max_drop_pct: 40
+    refresh_hours: 72
+    supports: ["Is this fund passported into the UAE, and from which domicile (ADGM / DIFC)?"]
+    limitations: ["Passporting allows marketing; it is not a guarantee of the fund's safety or returns."]
+
+  - id: cma_eosg_funds
+    official_name: End-of-service gratuity savings funds
+    publisher: UAE Capital Market Authority (CMA)
+    source_page: https://www.uaecma.gov.ae/en/open-data/mutual-funds/end-of-service-gratuity-savings-funds
+    kind: cma_content_list
+    schema: funds
+    pillar: knowledge
+    request: {type_id: 1076, template: end-of-service.html, sort: [{Key: ItemDate1, Operator: DESC}], page_size: 100}
+    record_key: groupId
+    required_fields: [id, groupId, title]
+    min_rows: 3
+    max_drop_pct: 60
+    refresh_hours: 168
+    supports: ["Which end-of-service savings funds are approved, and who runs them?"]
+    limitations: ["Approval of a fund is not a statement about its returns."]
+
+  - id: cma_auditors
+    official_name: Financial Auditors for PJSCs and Mutual Funds
+    publisher: UAE Capital Market Authority (CMA)
+    source_page: https://www.uaecma.gov.ae/en/open-data/companies/financial-auditors-for-pjscs-and-mutual-funds
+    kind: cma_content_list
+    schema: registered_entities
+    pillar: decisions
+    request: {type_id: 1045, template: financial-auditors.html, sort: [{Key: attr_ordering, Operator: ASC}], page_size: 100}
+    record_key: groupId
+    required_fields: [id, groupId, title]
+    min_rows: 3
+    max_drop_pct: 60
+    refresh_hours: 168
+    supports: ["Is this audit firm registered with the CMA?"]
+    limitations: ["Registration is not licensing; these firms do not handle investors' money."]
+
+  - id: cma_assembly_organizers
+    official_name: Organizers of General Assemblies of PJSCs
+    publisher: UAE Capital Market Authority (CMA)
+    source_page: https://www.uaecma.gov.ae/en/open-data/companies/organizer-of-general-assemblies-of-public-joint-stock-companies
+    kind: cma_content_list
+    schema: registered_entities
+    pillar: decisions
+    request: {type_id: 1070, template: organizer-of-general-assemblies.html, sort: [{Key: attr_order, Operator: ASC}], page_size: 100}
+    record_key: groupId
+    required_fields: [id, groupId, title]
+    min_rows: 1
+    max_drop_pct: 60
+    refresh_hours: 168
+    supports: ["Is this firm registered to organise shareholder meetings?"]
+    limitations: ["Registration is not licensing to manage money."]
+
+  - id: cma_appraisers
+    official_name: Appraisers of in-kind contributions
+    publisher: UAE Capital Market Authority (CMA)
+    source_page: https://www.uaecma.gov.ae/en/open-data/companies/appraisers-of-in-kind-for-public-joint-stock-companies-and-investment-funds
+    kind: html_table
+    schema: html_registered
+    pillar: decisions
+    request: {columns: {name: Company Name, date: Date of Registration}}
+    record_key: name
+    required_fields: [name]
+    min_rows: 1
+    max_drop_pct: 100
+    refresh_hours: 168
+    supports: ["Is this firm a registered appraiser?"]
+    limitations: ["A very short list published as a static page."]
+
+  # ---------------------------------------------------------------- PILLAR 1: grow know-how
+  - id: cma_publications
+    official_name: Numbers and Statistics (reports and data files)
+    publisher: UAE Capital Market Authority (CMA)
+    source_page: https://www.uaecma.gov.ae/en/open-data/numbers-and-statistics/the-numbers-and-statistics
+    kind: cma_content_list
+    schema: publications
+    pillar: knowledge
+    request: {type_id: 16, template: opendata.html, page_size: 100}
+    record_key: groupId
+    required_fields: [id, groupId, title]
+    min_rows: 5
+    max_drop_pct: 60
+    refresh_hours: 168
+    supports: ["Which official CMA reports and statistics files exist, and where to download them?"]
+    limitations: ["The files themselves (PDF / Excel) are linked, not read."]
+
+  - id: fcsc_cpi_annual
+    official_name: Consumer Price Index, annual (FCSC)
+    publisher: UAE Federal Competitiveness and Statistics Centre (FCSC)
+    source_page: https://opendata.fcsc.gov.ae/@federal-competitiveness-and-statistics-center/consumer-price-index
+    kind: local_csv
+    schema: cpi
+    pillar: knowledge
+    request: {file: fcsc_cpi_annual.csv}
+    record_key: key
+    required_fields: [MEASURE, CPI_DIV, TIME_PERIOD, OBS_VALUE]
+    min_rows: 100
+    max_drop_pct: 50
+    refresh_hours: 720
+    supports:
+      - How much have UAE consumer prices risen between two years, overall or by category (housing, food, transport, medical...)?
+    limitations:
+      - Annual national averages; your own costs (especially rent) can rise faster or slower.
+      - A file shipped with the app; replace data/reference/fcsc_cpi_annual.csv with a newer FCSC download to update it.
+
+# Datasets on the portal that are NOT fetched (and why) - shown on the status page so nothing is hidden.
+not_fetched:
+  - {name: Virtual Asset Service Providers, reason: "The CMA page only links to VARA's own public register (vara.ae); no list is published by the CMA."}
+  - {name: Graphs and Statistics, reason: "Interactive charts only; no machine-readable list on the page."}
+  - {name: Investor Portal, reason: "A menu of links to the other datasets, not a dataset itself."}
+  - {name: CMA Budget, reason: "One Excel file of the regulator's own budget; not useful to protect personal savings."}
+
+# =====================================================================================================
+# CATALOGUE METADATA - what each dataset MEANS, for people and for the search agent (agents/explorer.py)
+# =====================================================================================================
+#   description / description_ar   one plain-language paragraph a non-specialist understands
+#   keywords                        words people use when they mean this dataset (English and Arabic);
+#                                   the explorer routes questions with them, before any AI
+#   date_means                      what the record's date is (publication? registration?) - shown on screen
+#   fields                          every field shown to users and in the API, with its definition
+#                                   ("details.x" = a dataset-specific field inside details)
+# Arabic text has not yet been reviewed by a native speaker (docs/LIMITATIONS.md).
+catalog:
+  cma_warnings:
+    description: Public warnings the CMA has issued about companies, people and websites that are NOT licensed to offer financial services in the UAE. Each warning can name several entities and websites.
+    description_ar: تحذيرات تصدرها هيئة سوق رأس المال بشأن شركات وأشخاص ومواقع إلكترونية غير مرخص لها بتقديم خدمات مالية في الدولة. قد يذكر التحذير الواحد عدة جهات ومواقع.
+    keywords: [warning, warnings, warned, unlicensed, not licensed, scam, scams, fraud, blacklist, blacklisted, alert, unauthorised, unauthorized, تحذير, تحذيرات, غير مرخص, احتيال, نصب]
+    date_means: the date the CMA published the warning
+    fields:
+      name: the entities named in the warning, as published
+      name_ar: the Arabic text of the warning title
+      date: publication date of the warning
+      names: each entity named, split out for searching
+      domains: website domains named in the warning
+      details.statement: what the warning says
+
+  cma_finfluencers:
+    description: People authorised by the CMA to promote financial products on social media (finfluencers), with their registration number and how long the authorisation is valid.
+    description_ar: الأشخاص المصرح لهم من الهيئة بالترويج للمنتجات المالية عبر وسائل التواصل الاجتماعي، مع رقم التسجيل ومدة صلاحية التصريح.
+    keywords: [finfluencer, finfluencers, influencer, influencers, promoter, promoters, social media, instagram, tiktok, youtube, مؤثر, مؤثرين, مروج, ترويج]
+    date_means: the date the authorisation was issued
+    fields:
+      name: the finfluencer's name
+      name_ar: the name in Arabic
+      date: date the authorisation was issued
+      status: authorised
+      details.registration_no: CMA registration number
+      details.valid_until: last day the authorisation is valid
+      details.social_media: the accounts they are authorised to promote from
+
+  cma_violations:
+    description: Penalties the CMA has imposed for breaking capital market rules, with the rule broken and the decision (for example a fine).
+    description_ar: المخالفات والعقوبات التي فرضتها الهيئة على مخالفي قواعد سوق رأس المال، مع المادة المخالفة والقرار مثل الغرامة.
+    keywords: [violation, violations, violator, penalty, penalties, fine, fines, fined, sanction, sanctions, punished, breach, مخالفة, مخالفات, غرامة, عقوبة]
+    date_means: the date of the decision
+    fields:
+      name: who was penalised (often a role, such as "Investor")
+      date: date of the decision
+      category: the decision, for example the fine
+      details.violation: the rule that was broken
+      details.decision: the penalty imposed
+
+  cma_licensed_companies:
+    description: Companies licensed by the CMA to carry out financial activities in the UAE mainland, with licence code, status, website and the year they were licensed.
+    description_ar: الشركات المرخصة من الهيئة لمزاولة أنشطة مالية في الدولة، مع رمز الترخيص والحالة والموقع الإلكتروني وسنة الترخيص.
+    keywords: [licensed, licence, license, licenced, licensed company, licensed companies, licensed firm, licensed firms, broker, brokers, brokerage, regulated, authorised firm, مرخص, مرخصة, ترخيص, شركة مرخصة, وسيط]
+    date_means: not given by the CMA; the year licensed is in details
+    fields:
+      name: the company's registered name
+      name_ar: the name in Arabic
+      status: licence status (for example Active)
+      domains: the company's official website domain
+      details.licence_code: CMA licence code (CP-...)
+      details.website: official website as listed by the CMA
+      details.licensed_since_year: year the company was licensed
+
+  cma_licensed_activities:
+    description: The financial activities the CMA licenses (such as introduction, portfolio management or securities brokerage) and which licensed companies may carry out each one.
+    description_ar: الأنشطة المالية التي ترخصها الهيئة، مثل التعريف وإدارة المحافظ والوساطة، والشركات المرخص لها بمزاولة كل نشاط.
+    keywords: [activity, activities, allowed to, permitted to, may carry out, can do, portfolio management, brokerage, introduction, advice, custody, نشاط, أنشطة, مسموح]
+    date_means: not applicable
+    fields:
+      name: the licensed activity
+      details.company_codes: licence codes of the companies allowed to carry out this activity
+
+  cma_local_funds:
+    description: Investment funds established in the UAE and registered with the CMA, with their category (public or private).
+    description_ar: صناديق الاستثمار المؤسسة في الدولة والمسجلة لدى الهيئة، مع فئتها (عام أو خاص).
+    keywords: [local fund, local funds, fund, funds, mutual fund, mutual funds, investment fund, public fund, private fund, صندوق, صناديق, صندوق محلي]
+    date_means: not given by the CMA
+    fields:
+      name: the fund's name
+      category: fund category (Public or Private)
+      details.manager_or_title: the fund manager, where given
+      details.reference_no: CMA reference number
+
+  cma_passported_funds:
+    description: Funds from the UAE's financial free zones (ADGM, DIFC) that are passported, which means allowed to be marketed in the UAE mainland, and where each is domiciled.
+    description_ar: الصناديق القادمة من المناطق الحرة المالية (سوق أبوظبي العالمي ومركز دبي المالي العالمي) المسموح بتسويقها في الدولة، ومكان تأسيس كل منها.
+    keywords: [passported, passport, passporting, passported fund, passported funds, fund, funds, adgm, difc, free zone, free zone fund, foreign fund, صندوق مجاز, صناديق مجازة, جواز]
+    date_means: the date the fund was passported
+    fields:
+      name: the fund's name
+      date: date the fund was passported
+      category: where the fund is domiciled (ADGM or DIFC)
+      details.manager_or_title: the fund manager, where given
+      details.reference_no: CMA reference number
+
+  cma_eosg_funds:
+    description: Funds approved by the CMA to invest employees' end-of-service gratuity (the end-of-service savings scheme), with the bank or manager running each one.
+    description_ar: الصناديق المعتمدة من الهيئة لاستثمار مكافأة نهاية الخدمة للموظفين، مع البنك أو المدير المسؤول عن كل صندوق.
+    keywords: [end of service, end-of-service, gratuity, eosb, eosg, savings scheme, fund, funds, مكافأة نهاية الخدمة, نهاية الخدمة]
+    date_means: not given by the CMA
+    fields:
+      name: the fund's name
+      names: the fund and its manager
+      details.manager_or_title: the bank or manager running the fund
+
+  cma_auditors:
+    description: Audit firms registered with the CMA to audit public joint-stock companies (PJSCs) and mutual funds, and whether each is local or foreign.
+    description_ar: شركات التدقيق المسجلة لدى الهيئة لتدقيق حسابات الشركات المساهمة العامة وصناديق الاستثمار، وما إذا كانت محلية أو أجنبية.
+    keywords: [auditor, auditors, audit firm, audit firms, audit, accountant, مدقق, مدققين, تدقيق]
+    date_means: not given by the CMA
+    fields:
+      name: the audit firm's name
+      details.nationality: Local or Foreign
+
+  cma_assembly_organizers:
+    description: Companies registered with the CMA to organise the general assemblies (shareholder meetings) of public joint-stock companies.
+    description_ar: الشركات المسجلة لدى الهيئة لتنظيم الجمعيات العمومية للشركات المساهمة العامة.
+    keywords: [general assembly, general assemblies, agm, shareholder meeting, organiser, organizer, organizers, organisers, جمعية عمومية, منظم]
+    date_means: the date of registration
+    fields:
+      name: the organiser's name
+      date: date of registration
+
+  cma_appraisers:
+    description: Firms registered with the CMA to value in-kind contributions (assets given instead of cash) for public joint-stock companies and investment funds.
+    description_ar: الشركات المسجلة لدى الهيئة لتقييم الحصص العينية للشركات المساهمة العامة وصناديق الاستثمار.
+    keywords: [appraiser, appraisers, valuer, valuers, valuation, in-kind, in kind, مقيم, تقييم, حصص عينية]
+    date_means: the date of registration
+    fields:
+      name: the appraiser's name
+      date: date of registration
+
+  cma_publications:
+    description: Official CMA reports and statistics files, such as annual reports and market statistics, with links to download them.
+    description_ar: التقارير والملفات الإحصائية الرسمية للهيئة، مثل التقارير السنوية وإحصاءات السوق، مع روابط التحميل.
+    keywords: [report, reports, annual report, statistics, statistic, publication, publications, numbers, market data, trading, quarterly, تقرير, تقارير, إحصاءات, احصائيات, التقرير السنوي]
+    date_means: the date the file was published
+    fields:
+      name: the report's title
+      date: date published
+      details.documents: the downloadable files (PDF, Excel) and their links
+
+  fcsc_cpi_annual:
+    description: The UAE consumer price index by year and category (housing, food, transport, health...), published by the Federal Competitiveness and Statistics Centre. It shows how much prices have risen.
+    description_ar: مؤشر أسعار المستهلك في الدولة حسب السنة والفئة (السكن، الغذاء، النقل، الصحة...) الصادر عن المركز الاتحادي للتنافسية والإحصاء، ويبين مقدار ارتفاع الأسعار.
+    keywords: [inflation, cpi, consumer price, consumer prices, prices, cost of living, price index, تضخم, أسعار, مؤشر أسعار المستهلك, غلاء]
+    date_means: the year of the figure
+    fields:
+      category: the spending category code (ALL = everything)
+      details.measure: which index or rate the value is
+      details.year: the year
+      details.value: the figure
